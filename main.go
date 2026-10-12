@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -14,11 +17,6 @@ var (
 	startTui     *bool
 	sendMarkdown *string
 	sendTxt      *string
-
-	// TODO: parameterize these in a file
-	// cfg    = []string{"med tablets", "pants", "socks", "shirts"}
-	// threeDayItems = []string{"jumpers", "jeans"}
-	// singleItems   = []string{"deodorant", "toothbrush", "laptop", "water bottle", "headphones", "charger"}
 )
 
 type config struct {
@@ -27,13 +25,33 @@ type config struct {
 	SingleItems   []string `json:"singleItems"`
 }
 
+func NewDefaultConfig() config {
+	cfg := []string{"med tablets", "pants", "socks", "shirts"}
+	threeDayItems := []string{"jumpers", "jeans"}
+	singleItems := []string{"deodorant", "toothbrush", "laptop", "water bottle", "headphones", "charger"}
+	return config{
+		DailyItems:    cfg,
+		ThreeDayItems: threeDayItems,
+		SingleItems:   singleItems,
+	}
+}
+
+var configFileDoesntExist = errors.New("configuration file doesn't exist")
+var malformedConfigFile = errors.New("malformed config file")
+
 func readConfig(filename string) (config, error) {
 	contents, err := os.Open(filename)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return config{}, configFileDoesntExist
+		}
 		return config{}, err
 	}
 	var cfg config
 	if err := json.NewDecoder(contents).Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return config{}, malformedConfigFile
+		}
 		return config{}, err
 	}
 	return cfg, nil
@@ -53,7 +71,22 @@ func main() {
 	sendTxt = flag.String("text", "", "Send to a txt file")
 	flag.Parse()
 
-	cfg, err := readConfig("config.json")
+	homeDir, err := os.UserHomeDir()
+	mustNotBeErr("Home dir must be valid", err)
+
+	cfgPath := fmt.Sprintf("%s/%s", homeDir, ".go_away.json")
+	cfg, err := readConfig(cfgPath)
+	if errors.Is(err, configFileDoesntExist) {
+		fileCreated, newConfig := runMissingConfigFileFlow(cfgPath)
+		if !fileCreated {
+			fmt.Println("No file created. Make a config file at", cfgPath)
+			return
+		} else {
+			cfg = newConfig
+		}
+	} else {
+		mustNotBeErr("Config must exist and be valid", err)
+	}
 
 	fmt.Print("Days away for: ")
 	var input string
@@ -66,6 +99,32 @@ func main() {
 	mustPass("Days > 0", days > 0)
 
 	writeToAllOutputs(days, cfg)
+}
+
+func runMissingConfigFileFlow(path string) (fileCreated bool, cfg config) {
+	fmt.Println("Looks like there's no config file at %s", path)
+	fmt.Print("Would you like to create one? [y]es/[n]o (default: yes): ")
+	for {
+		var answer string
+		_, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		mustNotBeErr("Reading stdin must pass", err)
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		switch answer {
+		case "yes", "ye", "y", "":
+			cfg := NewDefaultConfig()
+			file, err := os.Create(path)
+			mustNotBeErr("Creating a file must succeed", err)
+			enc := json.NewEncoder(file)
+			enc.SetIndent("", "\t")
+			err = enc.Encode(cfg)
+			mustNotBeErr("Creating json file must succeed", err)
+			return true, cfg
+		case "n", "no":
+			return false, config{}
+		default:
+			fmt.Println("Invalid input, please try again or type Ctrl-C to exit")
+		}
+	}
 }
 
 // writeToAllOutputs function    writes to all the outputs specified in command line
